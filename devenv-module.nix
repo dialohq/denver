@@ -122,8 +122,8 @@
     ++ [
       ""
       "Scripts are also on the shell PATH directly; `denver <script>` and `<script>` are equivalent."
-      "Completion: add the output of `denver completions <bash|zsh|fish|nushell>` to your shell"
-      "config once; it completes via `denver --list`, so it follows whichever devenv is active."
+      "Completion is automatic in shells started inside this env. For an already-running"
+      "nushell: `overlay use .devenv/denver-completions.nu`. Other shells: `denver completions <shell>`."
     ]
   );
 
@@ -159,8 +159,11 @@
     complete -c denver -n __fish_use_subcommand -a '(denver --list 2>/dev/null)'
   '';
 
+  # Exported so the file works as a module: nushell vendor-autoloads it in
+  # shells started inside the env, and `overlay use .devenv/denver.nu` loads
+  # it into an already-running REPL (venv activate.nu style).
   nuCompletion = ''
-    def "nu-complete denver" [] {
+    export def "nu-complete denver" [] {
       if (which denver | is-empty) {
         return []
       }
@@ -198,10 +201,14 @@
       path = pkgs.writeText "denver.fish" fishCompletion;
     }
     {
-      name = "share/nushell/vendor/autoload/denver.nu";
-      path = pkgs.writeText "denver.nu" nuCompletion;
+      name = "share/nushell/vendor/autoload/denver-completions.nu";
+      path = nuCompletionFile;
     }
   ];
+
+  # Named so the module name differs from the `denver` extern — nushell
+  # forbids `export extern "denver"` from a module itself named `denver`.
+  nuCompletionFile = pkgs.writeText "denver-completions.nu" nuCompletion;
 
   scriptDispatch = lib.concatMapStrings (n: ''
     "${n}")
@@ -416,6 +423,7 @@ in {
         mkdir -p "$DEVENV_STATE"
         export XDG_DATA_DIRS="${denverShare}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
         export FPATH="${denverShare}/share/zsh/site-functions''${FPATH:+:$FPATH}"
+        ${pkgs.coreutils}/bin/install -m 0644 ${nuCompletionFile} "$DEVENV_STATE/denver-completions.nu"
         if [ -n "''${BASH_VERSION:-}" ] && [[ $- == *i* ]]; then
           eval "$(denver completions bash)"
         fi

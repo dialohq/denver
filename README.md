@@ -92,9 +92,17 @@ Completion files sit in standard `share/` locations and the shellHook exports
   `FPATH`/`XDG_DATA_DIRS` at startup (nushell vendor-autoloads
   `share/nushell/vendor/autoload/denver.nu`).
 
-The one case that can't be automatic: a zsh/fish/nushell that was **already
+The one case that isn't automatic: a zsh/fish/nushell that was **already
 running** when direnv loaded the env — those shells compute completion paths at
-startup. For that, add one line to your shell config, once:
+startup. For nushell, load it venv-style (the shellHook materializes the module
+at a stable path):
+
+```nu
+overlay use .devenv/denver-completions.nu
+```
+
+For zsh/fish (or to make nushell permanent), add one line to your shell config,
+once:
 
 ```console
 $ denver completions zsh   # eval in ~/.zshrc (after compinit)
