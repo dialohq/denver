@@ -184,6 +184,9 @@
   denverCli = pkgs.writeShellApplication {
     name = "denver";
     runtimeInputs = [upScript denverState] ++ scriptPkgs;
+    # The help/list/completions bodies are single-quoted on purpose (printf
+    # '%s' with escapeShellArg); SC2016 flags the $ inside them.
+    excludeShellChecks = ["SC2016"];
     text = ''
       cmd="''${1:-}"
       case "$cmd" in
@@ -377,7 +380,7 @@ in {
 
   config.shell = pkgs.mkShell ({
       name = "devenv-${name}";
-      packages = config.packages ++ servicePackages ++ scriptPkgs ++ [upScript denverState denverCli];
+      packages = config.packages ++ servicePackages ++ scriptPkgs ++ [denverState denverCli];
       shellHook = ''
         export DEVENV_ROOT="$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
         export DEVENV_STATE="$DEVENV_ROOT/.devenv"

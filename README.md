@@ -68,6 +68,34 @@ $ nix develop .#backend   # shell with scripts, packages, env, banner
 $ nix run .#backend-up    # mprocs with pg + api panes
 ```
 
+## The `denver` CLI
+
+Every devshell carries a `denver` command scoped to its environment:
+
+```console
+$ denver --help     # everything in this shell: services, commands, descriptions
+$ denver up         # launch the process group
+$ denver migrate    # run a script (scripts are also on PATH directly)
+$ denver state dump # denver-state passthrough
+```
+
+### Completion
+
+`denver --list` prints tab-separated `command<TAB>description` lines, and the
+completers emitted by `denver completions <shell>` call it at completion time —
+so one snippet in your shell config completes whichever devenv is currently
+active, and completes nothing outside one.
+
+```console
+$ denver completions bash >> ~/.bashrc          # or:
+$ denver completions zsh  >> ~/.zshrc           # needs compinit loaded
+$ denver completions fish > ~/.config/fish/completions/denver.fish
+$ denver completions nushell                    # add to config.nu (or save and `source` it)
+```
+
+After that, `denver <TAB>` lists `up`, every script with its description,
+`state`, and `completions`.
+
 ## Module args
 
 The flake module injects these into `perSystem` (and into every `devenv.<name>`
