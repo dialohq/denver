@@ -81,20 +81,31 @@ $ denver state dump # denver-state passthrough
 
 ### Completion
 
-`denver --list` prints tab-separated `command<TAB>description` lines, and the
-completers emitted by `denver completions <shell>` call it at completion time —
-so one snippet in your shell config completes whichever devenv is currently
-active, and completes nothing outside one.
+Completion ships with the devshell — no per-user setup for most paths.
+Completion files sit in standard `share/` locations and the shellHook exports
+`XDG_DATA_DIRS`/`FPATH` pointing at them:
+
+- `nix develop .#<name>` (bash) — registered directly by the shellHook.
+- bash + bash-completion + direnv — bash-completion resolves `XDG_DATA_DIRS`
+  lazily at first `<tab>`, so it picks denver up as soon as direnv loads the env.
+- any zsh/fish/nushell (≥0.96) **started inside** the devshell — they read
+  `FPATH`/`XDG_DATA_DIRS` at startup (nushell vendor-autoloads
+  `share/nushell/vendor/autoload/denver.nu`).
+
+The one case that can't be automatic: a zsh/fish/nushell that was **already
+running** when direnv loaded the env — those shells compute completion paths at
+startup. For that, add one line to your shell config, once:
 
 ```console
-$ denver completions bash >> ~/.bashrc          # or:
-$ denver completions zsh  >> ~/.zshrc           # needs compinit loaded
-$ denver completions fish > ~/.config/fish/completions/denver.fish
-$ denver completions nushell                    # add to config.nu (or save and `source` it)
+$ denver completions zsh   # eval in ~/.zshrc (after compinit)
+$ denver completions fish  # save to ~/.config/fish/completions/denver.fish
+$ denver completions nushell  # save + `source` from config.nu
 ```
 
-After that, `denver <TAB>` lists `up`, every script with its description,
-`state`, and `completions`.
+All completers call `denver --list` (tab-separated `command<TAB>description`)
+at completion time, so they follow whichever devenv is active and complete
+nothing outside one. `denver <TAB>` lists `up`, every script with its
+description, `state`, and `completions`.
 
 ## Module args
 

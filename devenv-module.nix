@@ -139,15 +139,20 @@
     complete -F _denver denver
   '';
 
-  zshCompletion = ''
+  zshFunction = ''
     _denver() {
       local -a lines cmds
       lines=("''${(@f)$(denver --list 2>/dev/null)}")
       cmds=("''${lines[@]//$'\t'/:}")
       _describe -t commands 'denver command' cmds
     }
-    compdef _denver denver
   '';
+
+  # For eval'ing into a live shell (`denver completions zsh`).
+  zshCompletion = zshFunction + "compdef _denver denver\n";
+
+  # Autoloadable fpath file (share/zsh/site-functions/_denver).
+  zshCompletionFile = "#compdef denver\n" + zshFunction + "_denver \"$@\"\n";
 
   fishCompletion = ''
     complete -c denver -f
@@ -173,6 +178,30 @@
       ...args: string
     ]
   '';
+
+  # Completion files in the standard discovery locations, wired up via
+  # XDG_DATA_DIRS/FPATH in the shellHook. bash-completion resolves
+  # XDG_DATA_DIRS lazily at first <tab>, so it works even when the env arrives
+  # via direnv; fish, zsh, and nushell (≥0.96 vendor autoload) read these
+  # paths at shell startup, covering any shell launched inside the devshell.
+  denverShare = pkgs.linkFarm "denver-completions" [
+    {
+      name = "share/bash-completion/completions/denver";
+      path = pkgs.writeText "denver.bash" bashCompletion;
+    }
+    {
+      name = "share/zsh/site-functions/_denver";
+      path = pkgs.writeText "_denver" zshCompletionFile;
+    }
+    {
+      name = "share/fish/vendor_completions.d/denver.fish";
+      path = pkgs.writeText "denver.fish" fishCompletion;
+    }
+    {
+      name = "share/nushell/vendor/autoload/denver.nu";
+      path = pkgs.writeText "denver.nu" nuCompletion;
+    }
+  ];
 
   scriptDispatch = lib.concatMapStrings (n: ''
     "${n}")
@@ -385,6 +414,11 @@ in {
         export DEVENV_ROOT="$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
         export DEVENV_STATE="$DEVENV_ROOT/.devenv"
         mkdir -p "$DEVENV_STATE"
+        export XDG_DATA_DIRS="${denverShare}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+        export FPATH="${denverShare}/share/zsh/site-functions''${FPATH:+:$FPATH}"
+        if [ -n "''${BASH_VERSION:-}" ] && [[ $- == *i* ]]; then
+          eval "$(denver completions bash)"
+        fi
         ${bannerScript}
         ${config.shellHook}
       '';
