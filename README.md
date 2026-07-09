@@ -11,8 +11,9 @@ postgres/clickhouse), **scripts** (commands on the devshell PATH), and
 
 Environments are isolated to `.dnvr/*` under the repo root, discover each
 other's runtime values (ports, socket dirs) through the bundled `dnvr-state`
-CLI, and run under a pluggable runner (`mprocs` by default, `process-compose`
-built in).
+CLI — or declaratively via `dnvr://` env refs, which double as the process
+dependency graph — and run under a pluggable runner (`mprocs` by default,
+`process-compose` built in).
 
 ## Usage (flake-parts)
 
@@ -29,7 +30,7 @@ built in).
       systems = ["x86_64-linux" "aarch64-darwin"];
       imports = [inputs.dnvr.flakeModule];
 
-      perSystem = {pkgs, presets, dnvrState, ...}: {
+      perSystem = {pkgs, presets, ...}: {
         dnvr.envs.backend = {
           description = "postgres + api server";
 
@@ -38,14 +39,9 @@ built in).
             package = pkgs.postgresql_17;
           };
 
-          processes.api.command = pkgs.writeShellApplication {
-            name = "api";
-            runtimeInputs = [dnvrState];
-            text = ''
-              PGHOST=$(dnvr-state wait pg.socketDir)
-              export PGHOST
-              exec my-api-server
-            '';
+          processes.api = {
+            env.PGHOST = "dnvr://pg/socketDir"; # blocks until pg publishes it
+            command = "my-api-server";
           };
 
           scripts.migrate = {
@@ -146,10 +142,15 @@ submodule):
   `runner_settings.<runner>.<key>` (e.g.
   `runner_settings."process-compose".depends_on`); each runner reads only its
   own key. Each process gets `DNVR_RUNTIME_DIR` scoped to its name so
-  `dnvr-state set` needs no self-identification.
+  `dnvr-state set` needs no self-identification. A process `env` value of
+  the form `dnvr://<proc>/<key>` declares a dependency — see
+  [`dnvr://` refs](#dnvr-refs).
 - `scripts.<name>` — `{text, runtimeInputs?, shell?, description?}` commands
   on the devshell PATH.
-- `env` — exported in the devshell and to every runner process.
+- `env` — exported in the devshell and to every runner process (`dnvr://`
+  values here are devshell-only conveniences, resolved best-effort at entry).
+- `dependencies` — read-only: `process -> [dependencies]`, derived from
+  `dnvr://` refs.
 - `prerun` — shell code run inside the up-script before the runner execs
   (dynamic port picking etc.; anything `export`ed flows to all processes).
 - `runner` — defaults to `runners.mprocs`.
@@ -171,6 +172,37 @@ $ dnvr-state dump                   # list everything published
 
 The runner wipes `$DNVR_STATE/runtime` on every launch so consumers never
 read stale values.
+
+### `dnvr://` refs
+
+A process `env` value that is exactly `dnvr://<proc>/<key>` is a reference
+to another process's published state. Before the consumer's command runs,
+its wrapper does `dnvr-state wait <proc>.<key>` (120 s timeout) and exports
+the value under the var's name — so startup ordering falls out of data
+readiness, with no `depends_on` wiring:
+
+```nix
+processes.api.env.PGHOST = "dnvr://pg/socketDir";
+```
+
+Semantics:
+
+- **Scoped to the consumer.** Ref vars are exported only to the process
+  that declares them; they never enter the shared runner env. In the
+  devshell they resolve best-effort at entry (exported only if already
+  published — re-enter after `dnvr up` to pick them up).
+- **Refs are the dependency graph.** `dnvr --help` shows `api→pg`, and
+  `dnvr.envs.<name>.dependencies` exposes `process -> [dependencies]` for
+  tooling. Unknown targets, self-references, and cycles fail at eval time.
+- **Whole-value refs only.** To hand a consumer a composed value (a URL,
+  a DSN), publish it already composed from the producer.
+- **Pure ordering deps** (migrations before api) need no special syntax:
+  publish a sentinel — `dnvr-state set done 1` in the producer,
+  `env.MIGRATIONS_DONE = "dnvr://migrations/done"` in the consumer. The
+  consumer then waits for *completion*, not just startup.
+- A string `command` that carries refs is wrapped in a script (with
+  `set -euo pipefail`); string commands without refs pass to the runner
+  untouched, as before.
 
 ## Top-level options
 
