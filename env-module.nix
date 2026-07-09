@@ -14,7 +14,77 @@
   processValues = lib.attrValues config.processes;
 
   processPackages = lib.concatMap (p: p.packages) processValues;
-  allEnv = lib.foldl' (a: p: a // p.env) {} processValues // config.env;
+
+  # dnvr:// refs — an env value that is exactly `dnvr://<proc>/<key>` is a
+  # reference to another process's dnvr-state key. It resolves at process
+  # start via `dnvr-state wait`, so the consumer blocks until the producer
+  # publishes the key, and the refs double as the dependency graph
+  # (`config.dependencies`). Whole-value refs only; to hand a consumer a
+  # composed value (a URL, a conn string), publish it composed from the
+  # producer. Process names can't contain dots (dnvr-state splits
+  # `<proc>.<key>` on the first dot); keys can.
+  parseRef = v:
+    if !(builtins.isString v)
+    then null
+    else let
+      m = builtins.match "dnvr://([A-Za-z0-9_-]+)/([A-Za-z0-9._-]+)" v;
+    in
+      if m == null
+      then null
+      else {
+        proc = lib.elemAt m 0;
+        key = lib.elemAt m 1;
+      };
+
+  refsOf = lib.filterAttrs (_: v: parseRef v != null);
+  plainOf = lib.filterAttrs (_: v: parseRef v == null);
+
+  processRefs = lib.mapAttrs (_: p: refsOf p.env) config.processes;
+  envRefs = refsOf config.env;
+
+  # Ref-valued vars bind to the process that declares them (resolved in its
+  # wrapper); only plain values flow into the shared runner/shell env.
+  allEnv = lib.foldl' (a: p: a // plainOf p.env) {} processValues // plainOf config.env;
+
+  knownProcs = lib.attrNames config.processes;
+
+  # consumer -> [producers], for every process (empty list when no refs).
+  depGraph =
+    lib.mapAttrs (
+      procName: refs:
+        lib.unique (lib.filter (d: d != procName)
+          (map (v: (parseRef v).proc) (lib.attrValues refs)))
+    )
+    processRefs;
+
+  badTargetErrors = owner: var: v: let
+    r = parseRef v;
+  in
+    lib.optional (!(lib.elem r.proc knownProcs))
+    "${owner}: env.${var} = \"${v}\" references unknown process '${r.proc}' (processes: ${lib.concatStringsSep ", " knownProcs})";
+
+  sorted = lib.toposort (a: b: lib.elem a (depGraph.${b} or [])) knownProcs;
+
+  refProblems =
+    lib.concatLists (lib.mapAttrsToList (
+        procName: refs:
+          lib.concatLists (lib.mapAttrsToList (
+              var: v:
+                badTargetErrors "process '${procName}'" var v
+                ++ lib.optional ((parseRef v).proc == procName)
+                "process '${procName}': env.${var} = \"${v}\" references itself — it would wait for its own key and time out"
+            )
+            refs)
+      )
+      processRefs)
+    ++ lib.concatLists (lib.mapAttrsToList (badTargetErrors "env") envRefs)
+    ++ lib.optional (sorted ? cycle)
+    "dependency cycle among processes: ${lib.concatStringsSep " -> " sorted.cycle} — each would wait for the other's key";
+
+  checkRefs = x:
+    if refProblems == []
+    then x
+    else throw "dnvr env '${name}': invalid dnvr:// refs:\n  - ${lib.concatStringsSep "\n  - " refProblems}";
   allScripts = lib.foldl' (a: p: a // p.scripts) {} processValues // config.scripts;
 
   scriptPkgs =
@@ -29,11 +99,24 @@
   # Wrap each process's command so DNVR_RUNTIME_DIR points at the per-process
   # runtime/<procname> directory and dnvr-state is on PATH. Lets the inner
   # command just say `dnvr-state set port 5432` without knowing its own name.
+  # dnvr:// env refs resolve here, before the exec: the wrapper blocks on
+  # `dnvr-state wait` until the producer publishes, then exports the value —
+  # so startup ordering falls out of data readiness, no depends_on needed.
+  # String commands normally pass through untouched, but a string command
+  # with refs gets the same wrapper (and thereby set -euo pipefail).
   # The runner receives only {command, runner_settings} — the devshell-facing
   # buckets (packages, env, scripts) must not leak into runner configs.
   wrapProcess = procName: p: let
+    refs = processRefs.${procName};
+    resolveRefs = lib.concatStrings (lib.mapAttrsToList (var: v: let
+      r = parseRef v;
+    in ''
+      ${var}="$(dnvr-state wait ${r.proc}.${r.key} --timeout 120)"
+      export ${var}
+    '')
+    refs);
     wrapped =
-      if lib.isDerivation p.command
+      if lib.isDerivation p.command || refs != {}
       then
         pkgs.writeShellApplication {
           name = "${procName}-scoped";
@@ -42,7 +125,11 @@
             : "''${DNVR_STATE:?DNVR_STATE must be set}"
             export DNVR_RUNTIME_DIR="$DNVR_STATE/runtime/${procName}"
             mkdir -p "$DNVR_RUNTIME_DIR"
-            exec ${lib.getExe p.command} "$@"
+            ${resolveRefs}${
+            if lib.isDerivation p.command
+            then ''exec ${lib.getExe p.command} "$@"''
+            else p.command
+          }
           '';
         }
       else p.command;
@@ -61,6 +148,19 @@
   };
 
   envForShell = lib.mapAttrs (_: v: toString v) allEnv;
+
+  # Refs in the devshell resolve best-effort at entry: processes are usually
+  # not running yet, so export only what's already published — a shell
+  # entered after `dnvr up` sees live values, one entered before doesn't.
+  # Inside the running processes the wrapper's `wait` is authoritative.
+  shellRefs = lib.foldl' (a: r: a // r) {} (lib.attrValues processRefs) // envRefs;
+
+  refShellExports = lib.concatStrings (lib.mapAttrsToList (var: v: let
+    r = parseRef v;
+  in ''
+    if ${var}="$(${dnvrState}/bin/dnvr-state get ${r.proc}.${r.key} 2>/dev/null)"; then export ${var}; fi
+  '')
+  shellRefs);
 
   # Banner: rendered by `gum style` at runtime. The nix string holds only plain
   # text — no raw ANSI bytes that would otherwise trip nix's strict JSON parser
@@ -90,10 +190,16 @@
     [
       {
         name = "up";
-        desc = "launch process group (${lib.concatStringsSep ", " (lib.attrNames wrappedProcesses)})";
+        desc = "launch process group (${lib.concatStringsSep ", " (map procLabel (lib.attrNames wrappedProcesses))})";
       }
     ]
     ++ scriptRows;
+
+  # "api→pg" in listings when api consumes one of pg's keys.
+  procLabel = n:
+    if depGraph.${n} == []
+    then n
+    else "${n}→${lib.concatStringsSep "," (depGraph.${n})}";
 
   renderRows = prefix: rows: let
     nameWidth = lib.foldl' lib.max 0 (map (c: lib.stringLength c.name) rows);
@@ -350,7 +456,23 @@ in {
     env = mkOption {
       type = types.attrsOf types.anything;
       default = {};
-      description = "Env vars set on the devshell and exported to the runner.";
+      description = ''
+        Env vars set on the devshell and exported to the runner. A
+        `dnvr://<proc>/<key>` value here is a shell convenience only:
+        resolved best-effort at shell entry, never sent to the runner and
+        never a dependency edge — put refs on the consuming process's `env`
+        for that.
+      '';
+    };
+
+    dependencies = mkOption {
+      type = types.attrsOf (types.listOf types.str);
+      readOnly = true;
+      description = ''
+        Dependency graph derived from dnvr:// env refs:
+        `<process> -> [processes whose keys it consumes]`. Every process is
+        a key; processes without refs map to `[]`.
+      '';
     };
 
     prerun = mkOption {
@@ -394,16 +516,18 @@ in {
     };
   };
 
-  config.up = upScript;
+  config.dependencies = depGraph;
 
-  config.shell = pkgs.mkShell ({
+  config.up = checkRefs upScript;
+
+  config.shell = checkRefs (pkgs.mkShell ({
       name = "dnvr-${name}";
       packages = config.packages ++ processPackages ++ scriptPkgs ++ [dnvrState dnvrCli];
       shellHook = ''
         export DNVR_ROOT="$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
         export DNVR_STATE="$DNVR_ROOT/.dnvr"
         mkdir -p "$DNVR_STATE"
-        export XDG_DATA_DIRS="${dnvrShare}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+        ${refShellExports}export XDG_DATA_DIRS="${dnvrShare}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
         export FPATH="${dnvrShare}/share/zsh/site-functions''${FPATH:+:$FPATH}"
         ${pkgs.coreutils}/bin/install -m 0644 ${nuCompletionFile} "$DNVR_STATE/dnvr-completions.nu"
         if [ -n "''${BASH_VERSION:-}" ] && [[ $- == *i* ]]; then
@@ -413,5 +537,5 @@ in {
         ${config.shellHook}
       '';
     }
-    // (lib.optionalAttrs (envForShell != {}) {env = envForShell;}));
+    // (lib.optionalAttrs (envForShell != {}) {env = envForShell;})));
 }

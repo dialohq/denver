@@ -24,7 +24,14 @@ in {
     env = mkOption {
       type = types.attrsOf types.anything;
       default = {};
-      description = "Env vars this process contributes to the devshell and the runner.";
+      description = ''
+        Env vars this process contributes to the devshell and the runner.
+        A value that is exactly `dnvr://<proc>/<key>` is a reference to
+        another process's dnvr-state key: it is resolved at process start
+        (blocking until the producer publishes it), exported only to this
+        process, and recorded as a dependency edge in the env's
+        `dependencies` graph.
+      '';
     };
 
     scripts = mkOption {
