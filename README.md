@@ -218,7 +218,8 @@ dnvr.shells.backend = {config, ...}: {
 The expansion rule, in one sentence: **the literal substring
 `$DNVR_ROOT` in an env value is expanded by the shell at export time
 (shellHook, runner, wrapper); everything else — including any other
-`$` — is exported verbatim.** Values are expanded before any program or
+`$` — is exported verbatim.** A longer identifier like `$DNVR_ROOT_DIR`
+names a different variable and stays verbatim too. Values are expanded before any program or
 subshell reads them, so they are correct in every shell, nushell
 included. One rule of thumb follows: in script bodies, read the env var
 (`$PGHOST` / `$env.PGHOST`), not the raw option — raw `$DNVR_ROOT`
