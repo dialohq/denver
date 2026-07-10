@@ -216,6 +216,36 @@ Semantics:
   `set -euo pipefail`); string commands without refs pass to the runner
   untouched, as before.
 
+### Pluggable ref schemes
+
+`dnvr://` is just the built-in entry in `refHandlers`, an env option
+mapping URL schemes to resolvers. Register your own — e.g. 1Password:
+
+```nix
+dnvr.envs.backend = {
+  refHandlers.op = {
+    command = url: "op read ${lib.escapeShellArg url}";
+    runtimeInputs = [pkgs._1password-cli];
+    resolveInShell = false; # don't block shell entry on op auth
+  };
+
+  processes.api.env = {
+    PGHOST = "dnvr://pg/socketDir";
+    STRIPE_KEY = "op://dev-vault/stripe/key";
+  };
+};
+```
+
+A handler's `command` gets the whole ref value and returns a shell
+command whose stdout becomes the var. It runs in the process wrapper
+before the command starts (a failing resolver aborts the process). At
+devshell entry refs resolve best-effort — failures skip the export —
+unless `resolveInShell = false`; `shellCommand` optionally overrides the
+entry-time command (the dnvr handler `wait`s in processes but only `get`s
+in the shell). Only whole-string values whose scheme has a handler are
+refs: `https://…` and friends pass through untouched. Dependency edges
+come only from `dnvr://` refs.
+
 ## Top-level options
 
 - `dnvr.presets.<name>` — custom process presets (deferred modules) merged
