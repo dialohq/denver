@@ -26,11 +26,13 @@ in {
       default = {};
       description = ''
         Env vars this process contributes to the devshell and the runner.
-        A value that is exactly `dnvr://<proc>/<key>` is a reference to
-        another process's dnvr-state key: it is resolved at process start
-        (blocking until the producer publishes it), exported only to this
-        process, and recorded as a dependency edge in the env's
-        `dependencies` graph.
+        A value that is exactly `<scheme>://…` for a scheme registered in
+        the env's `refHandlers` is a reference, resolved by that handler at
+        process start and exported only to this process. The built-in
+        `dnvr://<proc>/<key>` scheme reads another process's dnvr-state key
+        (blocking until published) and records a dependency edge in the
+        env's `dependencies` graph; other schemes resolve without creating
+        edges.
       '';
     };
 
