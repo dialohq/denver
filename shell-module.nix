@@ -111,11 +111,22 @@
     ++ lib.optional (sorted ? cycle)
     "dependency cycle among processes: ${lib.concatStringsSep " -> " sorted.cycle} — each would wait for the other's key";
 
-  checkRefs = x:
-    if refProblems == []
-    then x
-    else throw "dnvr shell '${name}': invalid dnvr:// refs:\n  - ${lib.concatStringsSep "\n  - " refProblems}";
   allScripts = lib.foldl' (a: p: a // p.scripts) {} processValues // config.scripts;
+
+  # The dnvr CLI dispatches scripts after its built-in subcommands, so a
+  # script by one of these names would exist but never be reachable.
+  reservedCliNames = ["up" "state" "completions" "help"];
+
+  scriptProblems =
+    map (n: "scripts.${n} shadows the built-in `dnvr ${n}` subcommand — pick another name")
+    (lib.filter (n: lib.elem n reservedCliNames) (lib.attrNames allScripts));
+
+  problems = refProblems ++ scriptProblems;
+
+  checkProblems = x:
+    if problems == []
+    then x
+    else throw "dnvr shell '${name}': invalid configuration:\n  - ${lib.concatStringsSep "\n  - " problems}";
 
   scriptPkgs =
     lib.mapAttrsToList
@@ -670,9 +681,9 @@ in {
 
   config.dependencies = depGraph;
 
-  config.up = checkRefs upScript;
+  config.up = checkProblems upScript;
 
-  config.shell = checkRefs (pkgs.mkShell ({
+  config.shell = checkProblems (pkgs.mkShell ({
       name = "dnvr-${name}";
       packages = config.packages ++ processPackages ++ scriptPkgs ++ [dnvrState dnvrCli];
       shellHook = ''
