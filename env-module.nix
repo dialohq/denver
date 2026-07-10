@@ -15,29 +15,50 @@
 
   processPackages = lib.concatMap (p: p.packages) processValues;
 
-  # dnvr:// refs — an env value that is exactly `dnvr://<proc>/<key>` is a
-  # reference to another process's dnvr-state key. It resolves at process
-  # start via `dnvr-state wait`, so the consumer blocks until the producer
-  # publishes the key, and the refs double as the dependency graph
-  # (`config.dependencies`). Whole-value refs only; to hand a consumer a
-  # composed value (a URL, a conn string), publish it composed from the
-  # producer. Process names can't contain dots (dnvr-state splits
-  # `<proc>.<key>` on the first dot); keys can.
-  parseRef = v:
+  # env refs — an env value that is exactly `<scheme>://<rest>`, where
+  # <scheme> has an entry in `refHandlers`, is a reference: the handler's
+  # command resolves it at process start, and its stdout becomes the var.
+  # Whole-value refs only. Values whose scheme has no handler (https://…,
+  # postgres://…) pass through as plain env. The built-in dnvr:// handler
+  # reads another process's dnvr-state key (blocking until published), and
+  # dnvr refs double as the dependency graph (`config.dependencies`).
+  matchUrl = v:
     if !(builtins.isString v)
     then null
     else let
-      m = builtins.match "dnvr://([A-Za-z0-9_-]+)/([A-Za-z0-9._-]+)" v;
+      m = builtins.match "([a-z][a-z0-9+.-]*)://(.+)" v;
     in
       if m == null
       then null
       else {
-        proc = lib.elemAt m 0;
-        key = lib.elemAt m 1;
+        scheme = lib.elemAt m 0;
+        rest = lib.elemAt m 1;
       };
+
+  parseRef = v: let
+    u = matchUrl v;
+  in
+    if u == null || !(config.refHandlers ? ${u.scheme})
+    then null
+    else u // {handler = config.refHandlers.${u.scheme};};
+
+  # dnvr://<proc>/<key> — process names can't contain dots (dnvr-state
+  # splits `<proc>.<key>` on the first dot); keys can. To hand a consumer a
+  # composed value (a URL, a conn string), publish it composed from the
+  # producer.
+  parseDnvrRef = v: let
+    m = builtins.match "dnvr://([A-Za-z0-9_-]+)/([A-Za-z0-9._-]+)" v;
+  in
+    if m == null
+    then null
+    else {
+      proc = lib.elemAt m 0;
+      key = lib.elemAt m 1;
+    };
 
   refsOf = lib.filterAttrs (_: v: parseRef v != null);
   plainOf = lib.filterAttrs (_: v: parseRef v == null);
+  dnvrRefsOf = lib.filterAttrs (_: v: parseRef v != null && (parseRef v).scheme == "dnvr");
 
   processRefs = lib.mapAttrs (_: p: refsOf p.env) config.processes;
   envRefs = refsOf config.env;
@@ -48,20 +69,26 @@
 
   knownProcs = lib.attrNames config.processes;
 
-  # consumer -> [producers], for every process (empty list when no refs).
+  # consumer -> [producers], for every process (empty list when no dnvr
+  # refs). Only the dnvr scheme creates edges — other handlers resolve
+  # values without implying process dependencies.
   depGraph =
     lib.mapAttrs (
       procName: refs:
         lib.unique (lib.filter (d: d != procName)
-          (map (v: (parseRef v).proc) (lib.attrValues refs)))
+          (map (v: (parseDnvrRef v).proc)
+            (lib.filter (v: parseDnvrRef v != null) (lib.attrValues (dnvrRefsOf refs)))))
     )
     processRefs;
 
-  badTargetErrors = owner: var: v: let
-    r = parseRef v;
+  dnvrRefErrors = owner: var: v: let
+    r = parseDnvrRef v;
   in
-    lib.optional (!(lib.elem r.proc knownProcs))
-    "${owner}: env.${var} = \"${v}\" references unknown process '${r.proc}' (processes: ${lib.concatStringsSep ", " knownProcs})";
+    if r == null
+    then ["${owner}: env.${var} = \"${v}\" is a malformed dnvr:// ref (expected dnvr://<process>/<key>)"]
+    else
+      lib.optional (!(lib.elem r.proc knownProcs))
+      "${owner}: env.${var} = \"${v}\" references unknown process '${r.proc}' (processes: ${lib.concatStringsSep ", " knownProcs})";
 
   sorted = lib.toposort (a: b: lib.elem a (depGraph.${b} or [])) knownProcs;
 
@@ -70,14 +97,17 @@
         procName: refs:
           lib.concatLists (lib.mapAttrsToList (
               var: v:
-                badTargetErrors "process '${procName}'" var v
-                ++ lib.optional ((parseRef v).proc == procName)
+                dnvrRefErrors "process '${procName}'" var v
+                ++ lib.optional (parseDnvrRef v != null && (parseDnvrRef v).proc == procName)
                 "process '${procName}': env.${var} = \"${v}\" references itself — it would wait for its own key and time out"
             )
-            refs)
+            (dnvrRefsOf refs))
       )
       processRefs)
-    ++ lib.concatLists (lib.mapAttrsToList (badTargetErrors "env") envRefs)
+    ++ lib.mapAttrsToList (
+      var: v: "env.${var} = \"${v}\": refs resolve at process start and never reach the devshell — move this to the consuming process's env, or read it live with `dnvr-state get`"
+    )
+    envRefs
     ++ lib.optional (sorted ? cycle)
     "dependency cycle among processes: ${lib.concatStringsSep " -> " sorted.cycle} — each would wait for the other's key";
 
@@ -111,16 +141,18 @@
     resolveRefs = lib.concatStrings (lib.mapAttrsToList (var: v: let
       r = parseRef v;
     in ''
-      ${var}="$(dnvr-state wait ${r.proc}.${r.key} --timeout 120)"
+      ${var}="$(${r.handler.command v})"
       export ${var}
     '')
     refs);
+    handlerInputs =
+      lib.unique (lib.concatMap (v: (parseRef v).handler.runtimeInputs) (lib.attrValues refs));
     wrapped =
       if lib.isDerivation p.command || refs != {}
       then
         pkgs.writeShellApplication {
           name = "${procName}-scoped";
-          runtimeInputs = [dnvrState];
+          runtimeInputs = [dnvrState] ++ handlerInputs;
           text = ''
             : "''${DNVR_STATE:?DNVR_STATE must be set}"
             export DNVR_RUNTIME_DIR="$DNVR_STATE/runtime/${procName}"
@@ -148,19 +180,6 @@
   };
 
   envForShell = lib.mapAttrs (_: v: toString v) allEnv;
-
-  # Refs in the devshell resolve best-effort at entry: processes are usually
-  # not running yet, so export only what's already published — a shell
-  # entered after `dnvr up` sees live values, one entered before doesn't.
-  # Inside the running processes the wrapper's `wait` is authoritative.
-  shellRefs = lib.foldl' (a: r: a // r) {} (lib.attrValues processRefs) // envRefs;
-
-  refShellExports = lib.concatStrings (lib.mapAttrsToList (var: v: let
-    r = parseRef v;
-  in ''
-    if ${var}="$(${dnvrState}/bin/dnvr-state get ${r.proc}.${r.key} 2>/dev/null)"; then export ${var}; fi
-  '')
-  shellRefs);
 
   # Banner: rendered by `gum style` at runtime. The nix string holds only plain
   # text — no raw ANSI bytes that would otherwise trip nix's strict JSON parser
@@ -457,11 +476,38 @@ in {
       type = types.attrsOf types.anything;
       default = {};
       description = ''
-        Env vars set on the devshell and exported to the runner. A
-        `dnvr://<proc>/<key>` value here is a shell convenience only:
-        resolved best-effort at shell entry, never sent to the runner and
-        never a dependency edge — put refs on the consuming process's `env`
-        for that.
+        Env vars set on the devshell and exported to the runner. Refs
+        are not allowed here — they resolve at process start, so they
+        belong on the process that consumes them (eval error otherwise).
+      '';
+    };
+
+    refHandlers = mkOption {
+      type = types.attrsOf (types.submodule {
+        options = {
+          command = mkOption {
+            type = types.functionTo types.str;
+            description = ''
+              Given the whole ref value (e.g. "op://vault/item/field"),
+              return a shell command whose stdout becomes the var. Runs in
+              the process wrapper before the command starts; a failing
+              resolver aborts the process.
+            '';
+          };
+          runtimeInputs = mkOption {
+            type = types.listOf types.package;
+            default = [];
+            description = "Packages the resolver needs on PATH.";
+          };
+        };
+      });
+      default = {};
+      description = ''
+        URL-scheme handlers for env refs, keyed by scheme. An env value
+        that is exactly `<scheme>://…` with a handler here is resolved by
+        it; schemes without handlers pass through as plain values. The
+        built-in `dnvr` entry resolves `dnvr://<proc>/<key>` via
+        dnvr-state and is the only scheme that creates dependency edges.
       '';
     };
 
@@ -516,6 +562,13 @@ in {
     };
   };
 
+  config.refHandlers.dnvr = {
+    command = url: let
+      r = parseDnvrRef url;
+    in "dnvr-state wait ${r.proc}.${r.key} --timeout 120";
+    runtimeInputs = [dnvrState];
+  };
+
   config.dependencies = depGraph;
 
   config.up = checkRefs upScript;
@@ -527,7 +580,7 @@ in {
         export DNVR_ROOT="$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
         export DNVR_STATE="$DNVR_ROOT/.dnvr"
         mkdir -p "$DNVR_STATE"
-        ${refShellExports}export XDG_DATA_DIRS="${dnvrShare}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+        export XDG_DATA_DIRS="${dnvrShare}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
         export FPATH="${dnvrShare}/share/zsh/site-functions''${FPATH:+:$FPATH}"
         ${pkgs.coreutils}/bin/install -m 0644 ${nuCompletionFile} "$DNVR_STATE/dnvr-completions.nu"
         if [ -n "''${BASH_VERSION:-}" ] && [[ $- == *i* ]]; then

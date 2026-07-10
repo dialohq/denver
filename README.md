@@ -151,8 +151,8 @@ submodule):
   [`dnvr://` refs](#dnvr-refs).
 - `scripts.<name>` — `{text, runtimeInputs?, shell?, description?}` commands
   on the devshell PATH.
-- `env` — exported in the devshell and to every runner process (`dnvr://`
-  values here are devshell-only conveniences, resolved best-effort at entry).
+- `env` — exported in the devshell and to every runner process. Refs are
+  not allowed here; they belong on the process that consumes them.
 - `dependencies` — read-only: `process -> [dependencies]`, derived from
   `dnvr://` refs.
 - `prerun` — shell code run inside the up-script before the runner execs
@@ -200,9 +200,9 @@ processes.api.env.PGHOST = "dnvr://pg/socketDir";
 Semantics:
 
 - **Scoped to the consumer.** Ref vars are exported only to the process
-  that declares them; they never enter the shared runner env. In the
-  devshell they resolve best-effort at entry (exported only if already
-  published — re-enter after `dnvr up` to pick them up).
+  that declares them; they never enter the shared runner env or the
+  devshell. Interactively, read live values with `dnvr-state get` (e.g.
+  `psql "$(dnvr-state get pg.socketUrl)"`).
 - **Refs are the dependency graph.** `dnvr --help` shows `api→pg`, and
   `dnvr.envs.<name>.dependencies` exposes `process -> [dependencies]` for
   tooling. Unknown targets, self-references, and cycles fail at eval time.
@@ -215,6 +215,32 @@ Semantics:
 - A string `command` that carries refs is wrapped in a script (with
   `set -euo pipefail`); string commands without refs pass to the runner
   untouched, as before.
+
+### Pluggable ref schemes
+
+`dnvr://` is just the built-in entry in `refHandlers`, an env option
+mapping URL schemes to resolvers. Register your own — e.g. 1Password:
+
+```nix
+dnvr.envs.backend = {
+  refHandlers.op = {
+    command = url: "op read ${lib.escapeShellArg url}";
+    runtimeInputs = [pkgs._1password-cli];
+  };
+
+  processes.api.env = {
+    PGHOST = "dnvr://pg/socketDir";
+    STRIPE_KEY = "op://dev-vault/stripe/key";
+  };
+};
+```
+
+A handler's `command` gets the whole ref value and returns a shell
+command whose stdout becomes the var. It runs in the process wrapper
+right before the command starts — refs resolve at process start, and
+nowhere else (a failing resolver aborts the process). Only whole-string
+values whose scheme has a handler are refs: `https://…` and friends pass
+through untouched. Dependency edges come only from `dnvr://` refs.
 
 ## Top-level options
 
