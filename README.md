@@ -192,10 +192,10 @@ Every process writes its `pid` file as it starts and holds an
 exclusive `flock` on it for life — the kernel drops the lock on death,
 SIGKILL included. `dnvr ps` reads liveness from the lock, not the pid
 number, so a recycled pid can never read as running: `running`
-(locked), `stopped` (no pid on record), `exited` (pid on record, lock
-released — a crash, or the runner was killed before it could clean
-up). The runner removes its processes' pid files when it exits;
-`dnvr-state get pg.pid` reads the value.
+(locked), `exited` (pid on record, lock released), `stopped` (no pid
+on record since the last launch). Nothing needs to clean pid files up
+— the lock is the truth, and the next launch wipes them like every
+other runtime key. `dnvr-state get pg.pid` reads the value.
 
 The built-in presets publish their full connection surface. postgres:
 `port`, `host`, `socketDir`, `dataDir`, `user`, `bootstrapDatabase` at

@@ -447,13 +447,11 @@
     # '%s' with escapeShellArg); SC2016 flags the $ inside them.
     excludeShellChecks = ["SC2016"];
     text = ''
-      # label, pidfile -> one `dnvr ps` table row. The runner removes pid
-      # files when it returns, so `stopped` (no pid on record) is the
-      # normal not-running state. Liveness comes from the exclusive flock
-      # the process holds on its pid file for life — never from the file's
-      # presence or the pid number, so recycled pids can't lie. A crashed
-      # process — or a killed runner — leaves an unlocked file behind
-      # until the next launch wipes it; those read `exited`.
+      # label, pidfile -> one `dnvr ps` table row. Liveness comes from the
+      # exclusive flock the process holds on its pid file for life — never
+      # from the file's presence or the pid number, so recycled pids can't
+      # lie. Files persist after exit (nothing cleans them; the next launch
+      # wipes them): unlocked file -> `exited`, no file -> `stopped`.
       __dnvr_ps_row() {
         local pid="-" status="stopped"
         if [ -f "$2" ]; then
