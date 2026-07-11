@@ -107,7 +107,11 @@ in {
     socketUrl = mkOption {
       type = types.str;
       readOnly = true;
-      description = "Unix-socket connection URL (`$DNVR_ROOT`-relative).";
+      description = ''
+        Unix-socket connection URL (`$DNVR_ROOT`-relative). Carries the
+        port: socket files are named `.s.PGSQL.<port>`, so libpq needs it
+        to pick the right one. Fully static — `port` cannot be dynamic.
+      '';
     };
   };
 
@@ -134,7 +138,7 @@ in {
       if tcpEnabled
       then "postgresql://${config.superuser}@${hostAddr}:${toString config.port}/${config.database}"
       else throw "dnvr postgres '${name}': `url` needs TCP but listenAddresses is empty — use `socketUrl`";
-    socketUrl = "postgresql://${config.superuser}@/${config.database}?host=$DNVR_ROOT/${config.socketDir}";
+    socketUrl = "postgresql://${config.superuser}@/${config.database}?host=$DNVR_ROOT/${config.socketDir}&port=${toString config.port}";
 
     packages = [postgresPkg];
 
