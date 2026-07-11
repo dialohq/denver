@@ -30,8 +30,8 @@ in
     # (flexi_logger FileSpec::default; no config/env override), so run it
     # from the logs dir to keep it out of the project root. Every process
     # sets its own cwd via $DNVR_ROOT, so mprocs' cwd doesn't affect them.
-    run = ''
+    exec = ''
       cd "$DNVR_STATE/logs"
-      mprocs --config ${cfg} "$@"
+      exec mprocs --config ${cfg} "$@"
     '';
   }

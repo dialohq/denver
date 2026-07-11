@@ -34,10 +34,10 @@ in
     runtimeInputs = [pkgs.process-compose];
     # The log path is runtime-dependent ($DNVR_STATE), so it is patched into
     # a temp copy of the store config at launch.
-    run = ''
+    exec = ''
       __cfg=$(${pkgs.coreutils}/bin/mktemp -t process-compose-XXXXXX.yaml)
       trap '${pkgs.coreutils}/bin/rm -f "$__cfg"' EXIT
       ${pkgs.gnused}/bin/sed "s|@PC_LOG@|$DNVR_STATE/logs/process-compose.log|g" ${cfg} > "$__cfg"
-      process-compose -f "$__cfg" "$@"
+      exec process-compose -f "$__cfg" "$@"
     '';
   }

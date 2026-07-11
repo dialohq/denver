@@ -13,16 +13,16 @@ in {
 
   # Shared up-script scaffolding: DNVR_STATE guard, env exports (plus a
   # DNVR_ROOT guard when any value expands it), scoped runtime wipe, prerun.
-  # `run` is the runner-specific tail that starts the process manager — in
-  # the foreground, not exec'd: the script must survive it to remove the
-  # pid keys its processes published.
+  # `exec` is the runner-specific tail that execs the process manager. pid
+  # files stay behind on exit — liveness is the flock each process holds,
+  # so an unlocked leftover reads `exited` and the next launch wipes it.
   mkUpScript = {
     name,
     processes,
     env,
     prerun,
     runtimeInputs,
-    run,
+    exec,
   }: let
     rootGuard =
       lib.optionalString (lib.any refersToRoot (lib.attrValues env))
@@ -44,16 +44,6 @@ in {
       '')
       (lib.attrNames processes);
 
-    # pid keys are the one published value tied to the group's lifetime:
-    # removed here once the manager returns (clean exit or not); only a
-    # kill of this script skips it, and `dnvr ps` reports those leftovers
-    # as `exited`.
-    pidCleanup =
-      lib.concatMapStrings
-      (n: ''
-        ${pkgs.coreutils}/bin/rm -f "$DNVR_STATE/runtime/"${lib.escapeShellArg n}/pid
-      '')
-      (lib.attrNames processes);
   in
     pkgs.writeShellApplication {
       inherit name runtimeInputs;
@@ -67,13 +57,7 @@ in {
         mkdir -p "$DNVR_STATE/logs" "$DNVR_STATE/runtime"
         ${runtimeWipe}
         ${prerun}
-        __dnvr_run() {
-          ${run}
-        }
-        __dnvr_status=0
-        __dnvr_run "$@" || __dnvr_status=$?
-        ${pidCleanup}
-        exit "$__dnvr_status"
+        ${exec}
       '';
     };
 }
