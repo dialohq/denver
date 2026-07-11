@@ -188,12 +188,14 @@ On every launch the runner wipes `$DNVR_STATE/runtime/<proc>` for its
 own processes so consumers never read stale values; state published by
 another shell's running group is left alone.
 
-Every process also publishes its `pid` as it starts (`dnvr-state get
-pg.pid`); the runner removes the pids of its processes when it exits.
-`dnvr ps` tabulates them, checking liveness against the actual process
-— `running`, `stopped` (no pid on record), or `exited` (pid on record,
-process gone: a crash, or the runner was killed before it could clean
-up) — so a stale file never reads as running.
+Every process writes its `pid` file as it starts and holds an
+exclusive `flock` on it for life — the kernel drops the lock on death,
+SIGKILL included. `dnvr ps` reads liveness from the lock, not the pid
+number, so a recycled pid can never read as running: `running`
+(locked), `stopped` (no pid on record), `exited` (pid on record, lock
+released — a crash, or the runner was killed before it could clean
+up). The runner removes its processes' pid files when it exits;
+`dnvr-state get pg.pid` reads the value.
 
 The built-in presets publish their full connection surface. postgres:
 `port`, `host`, `socketDir`, `dataDir`, `user`, `bootstrapDatabase` at

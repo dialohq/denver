@@ -205,12 +205,25 @@
   # (set -euo pipefail; refs resolve before the exec). Plain string commands
   # get the same env via a string preamble instead — they keep the runner's
   # sh semantics and are not shellchecked.
-  # Each path publishes `pid` before anything else (in the exec path $$
-  # survives the exec, so the key holds the final command's pid; elsewhere
-  # it is the supervising shell, whose lifetime tracks the command's).
-  # `dnvr ps` and `dnvr-state get <proc>.pid` read it.
+  # Each path claims its pid file before anything else: open it on fd 9,
+  # take an exclusive flock (fds survive exec, so the lock lives exactly as
+  # long as the process — the kernel drops it on death, SIGKILL included),
+  # then write $$. `dnvr ps` reads liveness from the lock, not the pid
+  # number, so a recycled pid can't masquerade as running; a duplicate
+  # launch of the same process fails fast on the held lock. The pid file
+  # is written in place, not via dnvr-state — its tmp+mv would detach the
+  # locked inode from the path.
   # The runner receives only {command, runner_settings} — the devshell-facing
   # buckets (packages, env, scripts) must not leak into runner configs.
+  claimPidFile = procName: ''
+    exec 9>"$DNVR_RUNTIME_DIR/pid"
+    flock -n 9 || {
+      echo "[${procName}] pid file is locked — already running?" >&2
+      exit 1
+    }
+    printf '%s\n' "$$" >&9
+  '';
+
   wrapProcess = procName: p: let
     refs = processRefs.${procName};
     resolveRefs = lib.concatStrings (lib.mapAttrsToList procResolveRef refs);
@@ -221,12 +234,12 @@
       then
         pkgs.writeShellApplication {
           name = "${procName}-scoped";
-          runtimeInputs = [dnvrState] ++ handlerInputs;
+          runtimeInputs = [dnvrState pkgs.flock] ++ handlerInputs;
           text = ''
             : "''${DNVR_STATE:?DNVR_STATE must be set}"
             export DNVR_RUNTIME_DIR="$DNVR_STATE/runtime/${procName}"
             mkdir -p "$DNVR_RUNTIME_DIR"
-            dnvr-state set pid "$$"
+            ${claimPidFile procName}
             ${resolveRefs}${
             if lib.isDerivation p.command
             then ''exec ${lib.getExe p.command} "$@"''
@@ -235,9 +248,9 @@
           '';
         }
       else ''
-        export PATH=${dnvrState}/bin:"$PATH" DNVR_RUNTIME_DIR="$DNVR_STATE/runtime/${procName}"
+        export PATH=${dnvrState}/bin:${pkgs.flock}/bin:"$PATH" DNVR_RUNTIME_DIR="$DNVR_STATE/runtime/${procName}"
         mkdir -p "$DNVR_RUNTIME_DIR"
-        dnvr-state set pid "$$"
+        ${claimPidFile procName}
         ${p.command}'';
   in {
     command = wrapped;
@@ -429,25 +442,27 @@
 
   dnvrCli = pkgs.writeShellApplication {
     name = "dnvr";
-    runtimeInputs = [upScript dnvrState] ++ scriptPkgs;
+    runtimeInputs = [upScript dnvrState pkgs.flock] ++ scriptPkgs;
     # The help/list/completions bodies are single-quoted on purpose (printf
     # '%s' with escapeShellArg); SC2016 flags the $ inside them.
     excludeShellChecks = ["SC2016"];
     text = ''
       # label, pidfile -> one `dnvr ps` table row. The runner removes pid
-      # keys when it returns, so `stopped` (no pid on record) is the normal
-      # not-running state. Liveness still comes from kill -0, never from
-      # the file's presence: a crashed process — or a killed runner —
-      # leaves its pid behind until the next launch wipes it, and those
-      # read `exited`.
+      # files when it returns, so `stopped` (no pid on record) is the
+      # normal not-running state. Liveness comes from the exclusive flock
+      # the process holds on its pid file for life — never from the file's
+      # presence or the pid number, so recycled pids can't lie. A crashed
+      # process — or a killed runner — leaves an unlocked file behind
+      # until the next launch wipes it; those read `exited`.
       __dnvr_ps_row() {
         local pid="-" status="stopped"
         if [ -f "$2" ]; then
           read -r pid < "$2" || true
-          if kill -0 "$pid" 2>/dev/null; then
-            status=running
-          else
+          [ -n "$pid" ] || pid="-"
+          if flock -ns "$2" true 2>/dev/null; then
             status=exited
+          else
+            status=running
           fi
         fi
         printf '%-${toString psWidth}s %-8s %s\n' "$1" "$pid" "$status"
